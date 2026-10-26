@@ -233,8 +233,17 @@ namespace RemoteMenu
         {
             var s = socket;
             var c = cts;
-            if (s == null || c == null) return;
-            SendAsync(s, json, c.Token).ContinueWith(t => { var _ = t.Exception; });
+            if (s == null || c == null)
+            {
+                Debug.LogWarning("[RemoteMenu] 送信できません(未接続): " + (json.Length > 80 ? json.Substring(0, 80) : json));
+                return;
+            }
+            var head = json.Length > 60 ? json.Substring(0, 60) : json;
+            SendAsync(s, json, c.Token).ContinueWith(t =>
+            {
+                if (t.IsFaulted) Debug.LogWarning("[RemoteMenu] 送信に失敗: " + t.Exception?.GetBaseException().Message + " / " + head);
+                else if (!json.StartsWith("{\"t\":\"asset\"") && !json.StartsWith("{\"t\":\"list\"")) Debug.Log("[RemoteMenu] 送信完了(" + s.State + "): " + head);
+            });
         }
 
         // ---- メインスレッド処理 ----
