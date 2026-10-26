@@ -172,8 +172,17 @@ namespace RemoteMenu
                         delay = 1000;
                         Status = "connected";
                         menusDirty = true;
+                        Debug.Log("[RemoteMenu] サーバーに接続しました");
                         _ = PingLoop(s, ct);
                         await Receive(s, ct);
+                        if (s.CloseStatusDescription == "replaced")
+                        {
+                            // 別の Unity(または再読み込み前に残った古い接続)と追い出し合わないよう、ここで止まる
+                            Debug.LogWarning("[RemoteMenu] 別の接続に置き換えられたため、この接続を停止しました。Unity が2つ起動していないか確認してください。");
+                            socket = null;
+                            Status = "停止: 別の接続に置き換えられました(「保存して接続を反映」で再開)";
+                            return;
+                        }
                     }
                 }
                 catch (OperationCanceledException) { break; }
