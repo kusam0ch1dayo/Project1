@@ -27,19 +27,26 @@ namespace RemoteMenu
 
         public static string Handle(Msg m)
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                string reply = null;
                 switch (m.t)
                 {
-                    case "list": return ListAssets(m);
-                    case "get": return Get(m);
-                    case "set": return Set(m);
-                    case "dup": return Dup(m);
-                    case "trash": return Trash(m);
+                    case "list": reply = ListAssets(m); break;
+                    case "get": reply = Get(m); break;
+                    case "set": reply = Set(m); break;
+                    case "dup": reply = Dup(m); break;
+                    case "trash": reply = Trash(m); break;
                 }
+                if (reply != null) Debug.Log("[RemoteMenu] " + m.t + " " + (m.prop ?? m.asset ?? "") + " (" + sw.ElapsedMilliseconds + " ms)");
+                return reply;
             }
-            catch (Exception e) { return Ack(m, false, e.Message, null); }
-            return null;
+            catch (Exception e)
+            {
+                Debug.LogWarning("[RemoteMenu] " + m.t + " 失敗: " + e);
+                return Ack(m, false, e.Message, null);
+            }
         }
 
         // ---- JSON 出力の補助 ----
@@ -433,8 +440,22 @@ namespace RemoteMenu
                 so.ApplyModifiedProperties();
             }
             EditorUtility.SetDirty(o);
-            AssetDatabase.SaveAssetIfDirty(o);
+            ScheduleSave();
             return Ack(m, true, null, null);
+        }
+
+        static bool saveScheduled;
+
+        /// <summary>応答を先に返し、ディスクへの保存は少し後にまとめて行う(保存が重くても画面が待たされない)。</summary>
+        static void ScheduleSave()
+        {
+            if (saveScheduled) return;
+            saveScheduled = true;
+            EditorApplication.delayCall += () =>
+            {
+                saveScheduled = false;
+                AssetDatabase.SaveAssets();
+            };
         }
 
         static bool SetValue(SerializedProperty p, string v, out string error)
