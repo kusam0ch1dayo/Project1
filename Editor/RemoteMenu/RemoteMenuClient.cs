@@ -64,6 +64,11 @@ namespace RemoteMenu
         static RemoteMenuClient()
         {
             Settings = Load();
+            // アセットインポート用の裏プロセス(Unity Editor が複数見えるもの)でも [InitializeOnLoad] は走る。
+            // そこから接続するとメイン Editor の接続を追い出してしまうので、メインの Editor だけで動かす。
+            if (AssetDatabase.IsAssetImportWorkerProcess() || Application.isBatchMode ||
+                UnityEditor.MPE.ProcessService.level != UnityEditor.MPE.ProcessLevel.Main)
+                return;
             EditorApplication.update += Pump;
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
             EditorApplication.quitting += Stop;
