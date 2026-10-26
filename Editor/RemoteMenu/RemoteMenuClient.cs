@@ -24,6 +24,11 @@ namespace RemoteMenu
         public string error;
         public string[] items;
         public string[] logs;
+        public string asset;
+        public string prop;
+        public string op;
+        public string value;
+        public int index;
     }
 
     [Serializable]
@@ -33,6 +38,7 @@ namespace RemoteMenu
         public string token = "";
         public bool enabled;
         public List<string> allowed = new List<string>();
+        public List<string> allowedTypes = new List<string>();
     }
 
     /// <summary>
@@ -71,7 +77,12 @@ namespace RemoteMenu
             try
             {
                 if (File.Exists(SettingsPath))
-                    return JsonUtility.FromJson<RemoteMenuSettings>(File.ReadAllText(SettingsPath)) ?? new RemoteMenuSettings();
+                {
+                    var loaded = JsonUtility.FromJson<RemoteMenuSettings>(File.ReadAllText(SettingsPath)) ?? new RemoteMenuSettings();
+                    if (loaded.allowed == null) loaded.allowed = new List<string>();
+                    if (loaded.allowedTypes == null) loaded.allowedTypes = new List<string>();
+                    return loaded;
+                }
             }
             catch (Exception e) { Debug.LogWarning("[RemoteMenu] 設定の読み込みに失敗: " + e.Message); }
             return new RemoteMenuSettings();
@@ -216,12 +227,14 @@ namespace RemoteMenu
             finally { sendLock.Release(); }
         }
 
-        static void Send(Msg m)
+        static void Send(Msg m) => SendRaw(JsonUtility.ToJson(m));
+
+        static void SendRaw(string json)
         {
             var s = socket;
             var c = cts;
             if (s == null || c == null) return;
-            SendAsync(s, JsonUtility.ToJson(m), c.Token).ContinueWith(t => { var _ = t.Exception; });
+            SendAsync(s, json, c.Token).ContinueWith(t => { var _ = t.Exception; });
         }
 
         // ---- メインスレッド処理 ----
@@ -239,7 +252,13 @@ namespace RemoteMenu
                 Msg m;
                 try { m = JsonUtility.FromJson<Msg>(text); }
                 catch { continue; }
-                if (m != null && m.t == "run") Run(m);
+                if (m == null) continue;
+                if (m.t == "run") Run(m);
+                else
+                {
+                    var reply = RemoteDataHandler.Handle(m);
+                    if (reply != null) SendRaw(reply);
+                }
             }
         }
 
