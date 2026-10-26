@@ -29,6 +29,7 @@ namespace RemoteMenu
         public string op;
         public string value;
         public int index;
+        public bool backlog;
     }
 
     [Serializable]
@@ -69,6 +70,7 @@ namespace RemoteMenu
             if (AssetDatabase.IsAssetImportWorkerProcess() || Application.isBatchMode ||
                 UnityEditor.MPE.ProcessService.level != UnityEditor.MPE.ProcessLevel.Main)
                 return;
+            RemoteLog.Init();
             EditorApplication.update += Pump;
             AssemblyReloadEvents.beforeAssemblyReload += Stop;
             EditorApplication.quitting += Stop;
@@ -256,7 +258,6 @@ namespace RemoteMenu
             SendAsync(s, json, c.Token).ContinueWith(t =>
             {
                 if (t.IsFaulted) Debug.LogWarning("[RemoteMenu] 送信に失敗: " + t.Exception?.GetBaseException().Message + " / " + head);
-                else if (!json.StartsWith("{\"t\":\"asset\"") && !json.StartsWith("{\"t\":\"list\"")) Debug.Log("[RemoteMenu] 送信完了(" + s.State + "): " + head);
             });
         }
 
@@ -270,6 +271,8 @@ namespace RemoteMenu
                 Send(new Msg { t = "menus", items = AllowedMenus().ToArray() });
             }
 
+            if (socket != null) RemoteLog.Flush(SendRaw);
+
             while (inbox.TryDequeue(out var text))
             {
                 Msg m;
@@ -280,8 +283,8 @@ namespace RemoteMenu
                     continue;
                 }
                 if (m == null) continue;
-                Debug.Log("[RemoteMenu] 受信: " + m.t + " " + (m.prop ?? m.path ?? m.asset ?? ""));
                 if (m.t == "run") Run(m);
+                else if (m.t == "logsub") RemoteLog.Subscribe(m.backlog);
                 else
                 {
                     var reply = RemoteDataHandler.Handle(m);

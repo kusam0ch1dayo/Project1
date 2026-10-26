@@ -38,8 +38,10 @@ namespace RemoteMenu
                     case "set": reply = Set(m); break;
                     case "dup": reply = Dup(m); break;
                     case "trash": reply = Trash(m); break;
+                    case "history": reply = History(m); break;
+                    case "undo": reply = UndoEntry(m); break;
                 }
-                if (reply != null) Debug.Log("[RemoteMenu] " + m.t + " " + (m.prop ?? m.asset ?? "") + " (" + sw.ElapsedMilliseconds + " ms)");
+                if (sw.ElapsedMilliseconds > 1000) Debug.Log("[RemoteMenu] " + m.t + " に " + sw.ElapsedMilliseconds + " ms かかりました");
                 return reply;
             }
             catch (Exception e)
@@ -51,7 +53,7 @@ namespace RemoteMenu
 
         // ---- JSON 出力の補助 ----
 
-        static void Q(StringBuilder sb, string s)
+        internal static void Q(StringBuilder sb, string s)
         {
             sb.Append('"');
             foreach (var c in s ?? "")
@@ -142,6 +144,51 @@ namespace RemoteMenu
             return label;
         }
 
+        const int MaxColumns = 40;
+
+        /// <summary>一覧での絞り込み・並べ替えに使う、トップレベルの単純な項目(数値・選択肢・ON/OFF)。</summary>
+        static List<(string name, string label, string kind)> SimpleColumns(SerializedObject so)
+        {
+            var cols = new List<(string, string, string)>();
+            var it = so.GetIterator();
+            var enter = true;
+            while (it.NextVisible(enter) && cols.Count < MaxColumns)
+            {
+                enter = false;
+                switch (it.propertyType)
+                {
+                    case SerializedPropertyType.Integer:
+                    case SerializedPropertyType.Float:
+                        cols.Add((it.name, it.displayName, "num"));
+                        break;
+                    case SerializedPropertyType.Boolean:
+                        cols.Add((it.name, it.displayName, "bool"));
+                        break;
+                    case SerializedPropertyType.Enum:
+                        ResolveField(it, out var t);
+                        if (!IsFlags(t)) cols.Add((it.name, it.displayName, "enum"));
+                        break;
+                }
+            }
+            return cols;
+        }
+
+        static void WriteColumnValue(StringBuilder sb, SerializedProperty p)
+        {
+            if (p == null) { sb.Append("null"); return; }
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.Integer: sb.Append(p.longValue.ToString(Inv)); break;
+                case SerializedPropertyType.Float: sb.Append(Num(p.floatValue)); break;
+                case SerializedPropertyType.Boolean: sb.Append(p.boolValue ? "true" : "false"); break;
+                case SerializedPropertyType.Enum:
+                    var idx = p.enumValueIndex;
+                    Q(sb, idx >= 0 && idx < p.enumDisplayNames.Length ? p.enumDisplayNames[idx] : "");
+                    break;
+                default: sb.Append("null"); break;
+            }
+        }
+
         static string ListAssets(Msg m)
         {
             var sb = new StringBuilder("{\"t\":\"list\",\"id\":");
@@ -150,27 +197,47 @@ namespace RemoteMenu
             var firstType = true;
             foreach (var type in RemoteMenuClient.Settings.allowedTypes.OrderBy(x => x, StringComparer.Ordinal))
             {
-                var items = new List<(string path, string label, int cat, int order)>();
+                var items = new List<(string path, string label, int cat, int order, string values)>();
+                List<(string name, string label, string kind)> cols = null;
                 foreach (var guid in AssetDatabase.FindAssets("t:" + type, new[] { "Assets" }))
                 {
                     var path = AssetDatabase.GUIDToAssetPath(guid);
                     var o = AssetDatabase.LoadMainAssetAtPath(path) as ScriptableObject;
                     if (o == null || o.GetType().Name != type) continue;
                     var label = LabelOf(o, out var cat, out var order, out _);
-                    items.Add((path, label, cat, order));
+                    var vals = new StringBuilder();
+                    using (var so = new SerializedObject(o))
+                    {
+                        if (cols == null) cols = SimpleColumns(so);
+                        for (var i = 0; i < cols.Count; i++)
+                        {
+                            if (i > 0) vals.Append(',');
+                            WriteColumnValue(vals, so.FindProperty(cols[i].name));
+                        }
+                    }
+                    items.Add((path, label, cat, order, vals.ToString()));
                 }
                 items = items.OrderBy(i => i.cat).ThenBy(i => i.order).ThenBy(i => i.label, StringComparer.Ordinal).ToList();
 
                 if (!firstType) sb.Append(',');
                 firstType = false;
                 sb.Append("{\"type\":"); Q(sb, type);
-                sb.Append(",\"assets\":[");
+                sb.Append(",\"cols\":[");
+                for (var i = 0; cols != null && i < cols.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append("{\"name\":"); Q(sb, cols[i].name);
+                    sb.Append(",\"label\":"); Q(sb, cols[i].label);
+                    sb.Append(",\"kind\":"); Q(sb, cols[i].kind);
+                    sb.Append('}');
+                }
+                sb.Append("],\"assets\":[");
                 for (var i = 0; i < items.Count; i++)
                 {
                     if (i > 0) sb.Append(',');
                     sb.Append("{\"p\":"); Q(sb, items[i].path);
                     sb.Append(",\"n\":"); Q(sb, items[i].label);
-                    sb.Append('}');
+                    sb.Append(",\"v\":[").Append(items[i].values).Append("]}");
                 }
                 sb.Append("]}");
             }
@@ -414,10 +481,13 @@ namespace RemoteMenu
             var o = LoadAllowed(m.asset, out var err);
             if (o == null) return Ack(m, false, err, null);
 
+            var snapshot = EditorJsonUtility.ToJson(o);
+            string oldValue, newValue;
             using (var so = new SerializedObject(o))
             {
                 var p = so.FindProperty(m.prop);
                 if (p == null) return Ack(m, false, "項目が見つかりません: " + m.prop, null);
+                oldValue = Display(p);
 
                 switch (m.op)
                 {
@@ -438,9 +508,21 @@ namespace RemoteMenu
                         break;
                 }
                 so.ApplyModifiedProperties();
+                newValue = Display(p);
             }
             EditorUtility.SetDirty(o);
             ScheduleSave();
+            RemoteHistory.instance.Add(new HistoryEntry
+            {
+                op = m.op == "insert" || m.op == "delete" ? m.op : "set",
+                asset = m.asset,
+                assetLabel = LabelOf(o, out _, out _, out _),
+                label = NicePath(m.prop) + (m.op == "insert" ? " に要素を追加" : m.op == "delete" ? " の #" + m.index + " を削除" : ""),
+                oldValue = oldValue,
+                newValue = newValue,
+                snapshot = snapshot,
+                undoable = true,
+            });
             return Ack(m, true, null, null);
         }
 
@@ -533,6 +615,11 @@ namespace RemoteMenu
             }
             EditorUtility.SetDirty(copy);
             AssetDatabase.SaveAssets();
+            RemoteHistory.instance.Add(new HistoryEntry
+            {
+                op = "dup", asset = dst, assetLabel = LabelOf(copy, out _, out _, out _),
+                label = "複製を作成", oldValue = "", newValue = Path.GetFileName(dst), undoable = true,
+            });
             return Ack(m, true, null, dst);
         }
 
@@ -540,7 +627,129 @@ namespace RemoteMenu
         {
             var o = LoadAllowed(m.asset, out var err);
             if (o == null) return Ack(m, false, err, null);
-            return AssetDatabase.MoveAssetToTrash(m.asset) ? Ack(m, true, null, null) : Ack(m, false, "削除に失敗しました", null);
+            var label = LabelOf(o, out _, out _, out _);
+            if (!AssetDatabase.MoveAssetToTrash(m.asset)) return Ack(m, false, "削除に失敗しました", null);
+            RemoteHistory.instance.Add(new HistoryEntry
+            {
+                op = "trash", asset = m.asset, assetLabel = label,
+                label = "削除(ゴミ箱へ)", oldValue = "", newValue = "", undoable = false,
+            });
+            return Ack(m, true, null, null);
+        }
+
+        // ---- 履歴・元に戻す ----
+
+        static string NicePath(string path)
+        {
+            var parts = path.Replace(".Array.data[", "[").Split('.');
+            return string.Join(" / ", parts.Select(p =>
+            {
+                var i = p.IndexOf('[');
+                return i < 0 ? ObjectNames.NicifyVariableName(p) : ObjectNames.NicifyVariableName(p.Substring(0, i)) + p.Substring(i);
+            }));
+        }
+
+        /// <summary>履歴に表示するための、値の短い文字列表現。</summary>
+        static string Display(SerializedProperty p)
+        {
+            switch (p.propertyType)
+            {
+                case SerializedPropertyType.Boolean: return p.boolValue ? "ON" : "OFF";
+                case SerializedPropertyType.Integer: return p.longValue.ToString(Inv);
+                case SerializedPropertyType.Float: return Num(p.numericType == SerializedPropertyNumericType.Double ? p.doubleValue : p.floatValue);
+                case SerializedPropertyType.String: return p.stringValue.Length > 80 ? p.stringValue.Substring(0, 80) + "…" : p.stringValue;
+                case SerializedPropertyType.Enum:
+                {
+                    ResolveField(p, out var t);
+                    if (IsFlags(t))
+                    {
+                        var mask = p.enumValueFlag;
+                        var names = Enum.GetNames(t).Where(n =>
+                        {
+                            var v = Convert.ToInt64(Enum.Parse(t, n));
+                            return v != 0 && (v & (v - 1)) == 0 && (mask & v) != 0;
+                        });
+                        var joined = string.Join(" | ", names);
+                        return joined.Length > 0 ? joined : "(なし)";
+                    }
+                    var idx = p.enumValueIndex;
+                    return idx >= 0 && idx < p.enumDisplayNames.Length ? p.enumDisplayNames[idx] : idx.ToString(Inv);
+                }
+                case SerializedPropertyType.ObjectReference:
+                    return p.objectReferenceValue != null ? p.objectReferenceValue.name : "(なし)";
+                case SerializedPropertyType.Vector2: return p.vector2Value.ToString();
+                case SerializedPropertyType.Vector3: return p.vector3Value.ToString();
+                case SerializedPropertyType.Vector4: return p.vector4Value.ToString();
+                case SerializedPropertyType.Vector2Int: return p.vector2IntValue.ToString();
+                case SerializedPropertyType.Vector3Int: return p.vector3IntValue.ToString();
+                case SerializedPropertyType.Color: return "#" + ColorUtility.ToHtmlStringRGBA(p.colorValue);
+                case SerializedPropertyType.Generic: return p.isArray ? "要素数 " + p.arraySize : "";
+                default: return "";
+            }
+        }
+
+        static string History(Msg m)
+        {
+            var sb = new StringBuilder("{\"t\":\"history\",\"id\":");
+            Q(sb, m.id);
+            sb.Append(",\"items\":[");
+            var list = RemoteHistory.instance.entries;
+            for (var i = list.Count - 1; i >= 0; i--)
+            {
+                var e = list[i];
+                if (i < list.Count - 1) sb.Append(',');
+                sb.Append("{\"seq\":").Append(e.seq);
+                sb.Append(",\"time\":").Append(e.time);
+                sb.Append(",\"op\":"); Q(sb, e.op);
+                sb.Append(",\"asset\":"); Q(sb, e.asset);
+                sb.Append(",\"assetLabel\":"); Q(sb, e.assetLabel);
+                sb.Append(",\"label\":"); Q(sb, e.label);
+                sb.Append(",\"oldValue\":"); Q(sb, e.oldValue);
+                sb.Append(",\"newValue\":"); Q(sb, e.newValue);
+                sb.Append(",\"undoable\":").Append(e.undoable && !e.undone ? "true" : "false");
+                sb.Append(",\"undone\":").Append(e.undone ? "true" : "false");
+                sb.Append('}');
+            }
+            return sb.Append("]}").ToString();
+        }
+
+        /// <summary>
+        /// 履歴の1件を取り消す。変更前のアセット全体に戻すため、同じアセットへのそれ以降の変更もまとめて戻る。
+        /// 取り消し自体も履歴に残るので、さらに取り消せば元に戻せる。
+        /// </summary>
+        static string UndoEntry(Msg m)
+        {
+            var h = RemoteHistory.instance;
+            var e = h.Find(m.index);
+            if (e == null) return Ack(m, false, "履歴が見つかりません", null);
+            if (!e.undoable || e.undone) return Ack(m, false, "この変更は元に戻せません", null);
+
+            if (e.op == "dup")
+            {
+                if (AssetDatabase.LoadMainAssetAtPath(e.asset) != null && !AssetDatabase.MoveAssetToTrash(e.asset))
+                    return Ack(m, false, "複製したアセットを削除できませんでした", null);
+                e.undone = true;
+                h.Add(new HistoryEntry { op = "undo", asset = e.asset, assetLabel = e.assetLabel, label = "取り消し: " + e.label, oldValue = e.newValue, newValue = "削除", undoable = false });
+                return Ack(m, true, null, null);
+            }
+
+            var o = LoadAllowed(e.asset, out var err);
+            if (o == null) return Ack(m, false, err, null);
+
+            var current = EditorJsonUtility.ToJson(o);
+            EditorJsonUtility.FromJsonOverwrite(e.snapshot, o);
+            EditorUtility.SetDirty(o);
+            ScheduleSave();
+
+            foreach (var later in h.entries)
+                if (later.seq >= e.seq && later.asset == e.asset && !later.undone && later.op != "trash") later.undone = true;
+            h.Add(new HistoryEntry
+            {
+                op = "undo", asset = e.asset, assetLabel = e.assetLabel,
+                label = "取り消し: " + e.label, oldValue = e.newValue, newValue = e.oldValue,
+                snapshot = current, undoable = true,
+            });
+            return Ack(m, true, null, null);
         }
     }
 }
