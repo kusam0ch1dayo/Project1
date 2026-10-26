@@ -251,8 +251,13 @@ namespace RemoteMenu
             {
                 Msg m;
                 try { m = JsonUtility.FromJson<Msg>(text); }
-                catch { continue; }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[RemoteMenu] 受信メッセージを解釈できません: " + e.Message + " / " + (text.Length > 200 ? text.Substring(0, 200) : text));
+                    continue;
+                }
                 if (m == null) continue;
+                Debug.Log("[RemoteMenu] 受信: " + m.t + " " + (m.prop ?? m.path ?? m.asset ?? ""));
                 if (m.t == "run") Run(m);
                 else
                 {
